@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: wa-gateway-mongo
+    restart: unless-stopped
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: changeme_in_production
+      MONGO_INITDB_DATABASE: whatsapp-gateway
+    healthcheck:
+      test: ['CMD', 'mongosh', '--eval', 'db.adminCommand("ping")']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wa-gateway-app
+    restart: unless-stopped
+    ports:
+      - '3333:3333'
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3333
+      HOST: 0.0.0.0
+      MONGODB_URI: mongodb://root:changeme_in_production@mongodb:27017/whatsapp-gateway?authSource=admin
+      MONGODB_DB_NAME: whatsapp-gateway
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-random-64-char-string-in-production}
+      JWT_EXPIRES_IN: 24h
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-change-this-pepper-string}
+      CORS_ORIGINS: http://localhost:3000,http://localhost:3333
+      RATE_LIMIT_ENABLED: 'true'
+      RATE_LIMIT_WINDOW_MS: '900000'
+      RATE_LIMIT_MAX: '100'
+      WEBHOOK_TIMEOUT_MS: '10000'
+      WEBHOOK_MAX_RETRIES: '5'
+      WEBHOOK_BASE_RETRY_MS: '1000'
+      WEBHOOK_MAX_RETRY_MS: '60000'
+      QR_TTL_SECONDS: '30'
+      INSTANCE_STARTUP_CONCURRENCY: '5'
+      MAX_RECONNECT_ATTEMPTS: '10'
+      MAX_RECONNECT_DELAY_MS: '300000'
+      LOG_LEVEL: info
+      METRICS_ENABLED: 'true'
+      MEDIA_STORAGE: local
+      DATA_DIR: /app/data
+    volumes:
+      - app_data:/app/data
+
+volumes:
+  mongo_data:
+  app_data:

@@ -1,0 +1,1488 @@
+openapi: 3.0.0
+info:
+  title: whatsapp-multi-gateway API
+  description: |
+    Production-grade multi-tenant WhatsApp API Gateway + Web Dashboard built on
+    Baileys v7. Provides REST endpoints for managing WhatsApp instances, sending
+    and receiving messages, HMAC-signed webhooks, real-time Socket.IO events,
+    authentication, RBAC and audit logging.
+  version: 1.0.0
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:3333
+    description: Local development server
+tags:
+  - name: Health
+    description: Liveness and readiness probes
+  - name: Auth
+    description: Login, current user and API key management
+  - name: Instances
+    description: WhatsApp instance lifecycle, QR, pairing and webhook configuration
+  - name: Messages
+    description: Sending WhatsApp messages
+  - name: Audit
+    description: Tenant-scoped audit log queries
+  - name: Metrics
+    description: Prometheus metrics
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Liveness probe
+      description: Returns server uptime and timestamp. Never fails.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Server is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  status: ok
+                  uptime: 1234.567
+                  timestamp: '2026-01-01T12:00:00.000Z'
+                requestId: req_4f9d2c1b
+  /ready:
+    get:
+      operationId: ready
+      summary: Readiness probe
+      description: Returns HTTP 200 when MongoDB is connected, otherwise HTTP 503.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Application is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  status: ok
+                  database: connected
+                requestId: req_4f9d2c1b
+        '503':
+          description: Application is not ready (MongoDB disconnected)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  status: error
+                  database: disconnected
+                  ready: false
+                requestId: req_4f9d2c1b
+
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      summary: Log in with email and password
+      description: Returns a JWT plus the authenticated user and their tenant.
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: owner@example.com
+              password: s3cret
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ...
+                  user:
+                    id: u_9f21ab
+                    email: owner@example.com
+                    name: Tenant Owner
+                    role: owner
+                  tenant:
+                    id: t_4aa8c0
+                    name: Acme Corp
+                    slug: acme
+                requestId: req_4f9d2c1b
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  code: UNAUTHORIZED
+                  message: Invalid email or password
+                requestId: req_4f9d2c1b
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/auth/me:
+    get:
+      operationId: getCurrentUser
+      summary: Get the current authenticated user and tenant
+      tags: [Auth]
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  user:
+                    id: u_9f21ab
+                    email: owner@example.com
+                    name: Tenant Owner
+                    role: owner
+                  tenant:
+                    id: t_4aa8c0
+                    name: Acme Corp
+                    slug: acme
+                requestId: req_4f9d2c1b
+        '401':
+          description: Missing or invalid credential
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/auth/api-keys:
+    post:
+      operationId: createApiKey
+      summary: Create an API key
+      description: Creates an API key for the caller's tenant. The plaintext key is returned only once.
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+            example:
+              name: production-bot
+              scopes: ['*']
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  id: k_a1b2c3
+                  name: production-bot
+                  scopes: ['*']
+                  keyPrefix: wag_a1b2
+                  plaintextKey: wag_a1b2c3d4e5f6...
+                  createdAt: '2026-01-01T12:00:00.000Z'
+                requestId: req_4f9d2c1b
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    get:
+      operationId: listApiKeys
+      summary: List API keys for the tenant
+      tags: [Auth]
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  - id: k_a1b2c3
+                    name: production-bot
+                    keyPrefix: wag_a1b2
+                    scopes: ['*']
+                    expiresAt: null
+                    lastUsedAt: '2026-01-02T08:00:00.000Z'
+                    createdAt: '2026-01-01T12:00:00.000Z'
+                requestId: req_4f9d2c1b
+
+  /api/v1/auth/api-keys/{id}:
+    delete:
+      operationId: deleteApiKey
+      summary: Delete an API key
+      tags: [Auth]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API key deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  deleted: true
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: API key not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances:
+    post:
+      operationId: createInstance
+      summary: Create a WhatsApp instance
+      description: |
+        Creates and starts a new WhatsApp connection. When `usePairingCode` is
+        true and `phoneNumber` is provided a pairing code is returned instead of
+        a QR code.
+      tags: [Instances]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInstanceRequest'
+            example:
+              name: sales-line
+              webhookUrl: https://example.com/webhook
+              webhookSecret: some-secret
+              usePairingCode: false
+      responses:
+        '201':
+          description: Instance created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  instance:
+                    id: inst_4f9d2c1b
+                    instanceId: inst_4f9d2c1b
+                    name: sales-line
+                    status: qr_ready
+                    phoneNumber: null
+                    pushName: null
+                    platform: null
+                    connectionState: connecting
+                    webhookUrl: https://example.com/webhook
+                    createdAt: '2026-01-01T12:00:00.000Z'
+                  qr: '2@...'
+                requestId: req_4f9d2c1b
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    get:
+      operationId: listInstances
+      summary: List instances for the tenant
+      tags: [Instances]
+      responses:
+        '200':
+          description: List of instances
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  - id: inst_4f9d2c1b
+                    instanceId: inst_4f9d2c1b
+                    name: sales-line
+                    status: connected
+                    phoneNumber: '15551234567'
+                    pushName: Sales Line
+                    webhookUrl: https://example.com/webhook
+                    connectionState: open
+                requestId: req_4f9d2c1b
+
+  /api/v1/instances/{id}:
+    get:
+      operationId: getInstance
+      summary: Get a single instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instance details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  instance:
+                    id: inst_4f9d2c1b
+                    instanceId: inst_4f9d2c1b
+                    name: sales-line
+                    status: connected
+                    phoneNumber: '15551234567'
+                    connectionState: open
+                    webhookUrl: https://example.com/webhook
+                    lastConnectedAt: '2026-01-01T12:00:00.000Z'
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  code: NOT_FOUND
+                  message: "Instance with id 'inst_xxx' not found"
+                requestId: req_4f9d2c1b
+    delete:
+      operationId: deleteInstance
+      summary: Delete an instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instance deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  deleted: true
+                  instanceId: inst_4f9d2c1b
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/qr:
+    get:
+      operationId: getInstanceQr
+      summary: Get the current QR code for an instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current QR code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  qr: '2@1x9c...'
+                  instanceId: inst_4f9d2c1b
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: No QR code currently available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                success: false
+                error:
+                  code: CONFLICT
+                  message: No QR code is currently available for this instance
+                requestId: req_4f9d2c1b
+
+  /api/v1/instances/{id}/qr/status:
+    get:
+      operationId: getInstanceQrStatus
+      summary: Get instance status and connected flag
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instance status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  instanceId: inst_4f9d2c1b
+                  status: connected
+                  connected: true
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/pairing:
+    post:
+      operationId: requestPairingCode
+      summary: Request a WhatsApp pairing code
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PairingRequest'
+            example:
+              phoneNumber: '15551234567'
+      responses:
+        '200':
+          description: Pairing code issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  pairingCode: ABCDEFGH
+                  phoneNumber: '15551234567'
+                requestId: req_4f9d2c1b
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/disconnect:
+    post:
+      operationId: disconnectInstance
+      summary: Disconnect an instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instance disconnected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  disconnected: true
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/reconnect:
+    post:
+      operationId: reconnectInstance
+      summary: Reconnect an instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instance reconnected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  reconnected: true
+                  instanceId: inst_4f9d2c1b
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/logout:
+    post:
+      operationId: logoutInstance
+      summary: Log out of WhatsApp and delete session credentials
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Instance logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  loggedOut: true
+                  instanceId: inst_4f9d2c1b
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/chats:
+    get:
+      operationId: listChats
+      summary: List chats for an instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of chats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  chats: []
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/groups:
+    get:
+      operationId: listGroups
+      summary: List groups for an instance
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of groups
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  groups: []
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/webhook:
+    get:
+      operationId: getInstanceWebhook
+      summary: Read webhook configuration
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Webhook configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  webhookUrl: https://example.com/webhook
+                  hasSecret: true
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Instance not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    put:
+      operationId: updateInstanceWebhook
+      summary: Update webhook URL and/or secret
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookConfigRequest'
+            example:
+              webhookUrl: https://example.com/webhook
+              webhookSecret: new-secret
+      responses:
+        '200':
+          description: Webhook configuration updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  updated: true
+                requestId: req_4f9d2c1b
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/webhook/test:
+    post:
+      operationId: testInstanceWebhook
+      summary: Send a test webhook delivery
+      tags: [Instances]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Test webhook dispatched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  tested: true
+                  message: test webhook dispatched
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/instances/{id}/messages/text:
+    post:
+      operationId: sendTextMessage
+      summary: Send a text message from an instance
+      tags: [Messages]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            example:
+              to: '15559876543'
+              text: 'Hello from the gateway!'
+      responses:
+        '200':
+          description: Message queued/sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  messageId: BAE5A1B2C3
+                  instanceId: inst_4f9d2c1b
+                requestId: req_4f9d2c1b
+        '400':
+          description: Validation error or instance not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner, admin or operator)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/messages/{id}/send:
+    post:
+      operationId: sendTextMessageCompat
+      summary: Send a text message (compatibility alias)
+      description: Alias of POST /api/v1/instances/{id}/messages/text.
+      tags: [Messages]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '200':
+          description: Message queued/sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/audit:
+    get:
+      operationId: listAuditEntries
+      summary: Query the tenant audit log
+      description: Returns tenant-scoped audit entries, optionally filtered by instance and action.
+      tags: [Audit]
+      parameters:
+        - in: query
+          name: instanceId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: action
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                data:
+                  entries:
+                    - id: a_abc123
+                      action: instance.create
+                      resourceType: instance
+                      resourceId: inst_4f9d2c1b
+                      userId: u_9f21ab
+                      apiKeyId: null
+                      timestamp: '2026-01-01T12:00:00.000Z'
+                      result: success
+                      details:
+                        name: sales-line
+                  count: 1
+                requestId: req_4f9d2c1b
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Forbidden (role must be owner or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/v1/metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics endpoint
+      description: Exposes Prometheus metrics in the text exposition format.
+      tags: [Metrics]
+      security: []
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP process_cpu_user_seconds_total Total user CPU time spent in seconds.
+                # TYPE process_cpu_user_seconds_total counter
+                process_cpu_user_seconds_total 12.34
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Bearer JWT obtained from POST /api/v1/auth/login. Any protected endpoint
+        also accepts an X-API-Key header instead of a Bearer token.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        API key created via POST /api/v1/auth/api-keys. The plaintext key starts
+        with 'wag_' and is shown once at creation. Keys are hashed at rest.
+
+  schemas:
+    SuccessEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          description: Response payload (shape varies per endpoint)
+        requestId:
+          type: string
+          example: req_4f9d2c1b
+      required: [success, data, requestId]
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          const: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: UNAUTHORIZED
+            message:
+              type: string
+              example: Unauthorized
+            details:
+              type: object
+              additionalProperties: true
+          required: [code, message]
+        requestId:
+          type: string
+          example: req_4f9d2c1b
+      required: [success, error, requestId]
+
+    InstanceStatus:
+      type: string
+      enum:
+        - created
+        - connecting
+        - qr_ready
+        - pairing_code_ready
+        - connected
+        - disconnected
+        - reconnecting
+        - logged_out
+        - error
+        - deleting
+
+    Instance:
+      type: object
+      properties:
+        id:
+          type: string
+          example: inst_4f9d2c1b
+        instanceId:
+          type: string
+          example: inst_4f9d2c1b
+        name:
+          type: string
+          example: sales-line
+        status:
+          $ref: '#/components/schemas/InstanceStatus'
+        phoneNumber:
+          type: string
+          nullable: true
+          example: '15551234567'
+        pushName:
+          type: string
+          nullable: true
+          example: Sales Line
+        profilePictureUrl:
+          type: string
+          nullable: true
+        platform:
+          type: string
+          nullable: true
+        connectionState:
+          type: string
+          nullable: true
+          example: open
+        webhookUrl:
+          type: string
+          nullable: true
+          example: https://example.com/webhook
+        pairingCode:
+          type: string
+          nullable: true
+        pairingPhoneNumber:
+          type: string
+          nullable: true
+        lastConnectedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastDisconnectedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastErrorAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          example: u_9f21ab
+        email:
+          type: string
+          example: owner@example.com
+        name:
+          type: string
+          example: Tenant Owner
+        role:
+          $ref: '#/components/schemas/UserRole'
+      required: [id, email, name, role]
+
+    UserRole:
+      type: string
+      enum: [owner, admin, operator, viewer]
+
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          example: t_4aa8c0
+        name:
+          type: string
+          example: Acme Corp
+        slug:
+          type: string
+          example: acme
+      required: [id, name, slug]
+
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+          example: k_a1b2c3
+        name:
+          type: string
+          example: production-bot
+        keyPrefix:
+          type: string
+          example: wag_a1b2
+        scopes:
+          type: array
+          items:
+            type: string
+          example: ['*']
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        plaintextKey:
+          type: string
+          description: Only present in the POST /api/v1/auth/api-keys response.
+          example: wag_...
+      required: [id, name, keyPrefix]
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+        instanceId:
+          type: string
+        messageId:
+          type: string
+        remoteJid:
+          type: string
+          example: '1234567890@s.whatsapp.net'
+        participant:
+          type: string
+          nullable: true
+        fromMe:
+          type: boolean
+        direction:
+          type: string
+          enum: [inbound, outbound]
+        messageType:
+          type: string
+          enum:
+            - text
+            - image
+            - video
+            - audio
+            - document
+            - sticker
+            - location
+            - contact
+            - reaction
+            - ephemeral
+            - unknown
+        text:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, sent, delivered, read, played, failed, expired]
+        timestamp:
+          type: string
+          format: date-time
+      required: [id, instanceId, messageId, direction, status]
+
+    AuditLogEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          example: a_abc123
+        action:
+          type: string
+          example: instance.create
+        resourceType:
+          type: string
+          example: instance
+        resourceId:
+          type: string
+          nullable: true
+        userId:
+          type: string
+          nullable: true
+        apiKeyId:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+        result:
+          type: string
+          enum: [success, failure]
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
+      required: [id, action, result]
+
+    WebhookDelivery:
+      type: object
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        instanceId:
+          type: string
+        deliveryId:
+          type: string
+          example: del_4f9d2c1b
+        event:
+          type: string
+          example: message.received
+        url:
+          type: string
+          example: https://example.com/webhook
+        status:
+          type: string
+          enum: [pending, success, failed, retrying, dead]
+        statusCode:
+          type: integer
+          nullable: true
+        attempts:
+          type: integer
+        lastAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+        nextAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+        response:
+          type: string
+          nullable: true
+      required: [id, instanceId, deliveryId, event, status]
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          example: owner@example.com
+        password:
+          type: string
+          minLength: 1
+          example: s3cret
+
+    CreateInstanceRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: sales-line
+        webhookUrl:
+          type: string
+          format: uri
+          example: https://example.com/webhook
+        webhookSecret:
+          type: string
+          minLength: 8
+          example: some-secret
+        usePairingCode:
+          type: boolean
+          default: false
+        phoneNumber:
+          type: string
+          example: '15551234567'
+
+    SendMessageRequest:
+      type: object
+      required: [to, text]
+      additionalProperties: false
+      properties:
+        to:
+          type: string
+          minLength: 1
+          example: '15559876543'
+        text:
+          type: string
+          example: 'Hello from the gateway!'
+
+    WebhookConfigRequest:
+      type: object
+      required: [webhookUrl]
+      additionalProperties: false
+      properties:
+        webhookUrl:
+          type: string
+          format: uri
+          example: https://example.com/webhook
+        webhookSecret:
+          type: string
+          minLength: 8
+          example: some-secret
+
+    PairingRequest:
+      type: object
+      required: [phoneNumber]
+      additionalProperties: false
+      properties:
+        phoneNumber:
+          type: string
+          minLength: 1
+          example: '15551234567'
+
+    CreateApiKeyRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: production-bot
+        scopes:
+          type: array
+          items:
+            type: string
+            minLength: 1
+          example: ['*']

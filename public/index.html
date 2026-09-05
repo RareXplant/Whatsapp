@@ -1,0 +1,1022 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WhatsApp Multi Gateway</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              surface: {
+                50: '#1a1a2e',
+                100: '#16213e',
+                200: '#0f3460',
+                300: '#533483',
+                400: '#e94560',
+              },
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      body {
+        background: #0f172a;
+        font-family:
+          'Segoe UI',
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 6px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-track {
+        background: #1e293b;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb {
+        background: #475569;
+        border-radius: 3px;
+      }
+      .toast {
+        animation: slideIn 0.3s ease-out;
+      }
+      @keyframes slideIn {
+        from {
+          transform: translateX(100%);
+          opacity: 0;
+        }
+        to {
+          transform: translateX(0);
+          opacity: 1;
+        }
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .spinner {
+        animation: spin 0.6s linear infinite;
+      }
+      .modal-backdrop {
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(4px);
+      }
+      input:focus,
+      select:focus,
+      textarea:focus {
+        outline: none;
+        box-shadow: 0 0 0 2px #6366f1;
+      }
+      .qr-canvas {
+        image-rendering: pixelated;
+      }
+    </style>
+  </head>
+  <body class="min-h-screen text-gray-100">
+    <div id="app"></div>
+
+    <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm"></div>
+
+    <script>
+      (function () {
+        'use strict';
+
+        const API = '/api/v1';
+        let jwt = localStorage.getItem('jwt');
+        let currentUser = JSON.parse(localStorage.getItem('user') || 'null');
+        let currentTenant = JSON.parse(localStorage.getItem('tenant') || 'null');
+        let socket = null;
+        let instances = [];
+        let apiKeys = [];
+        let auditEntries = [];
+
+        function escapeHtml(str) {
+          if (str == null) return '';
+          return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+        }
+
+        function toast(msg, type) {
+          const c = document.getElementById('toast-container');
+          const colors = {
+            success: 'bg-emerald-600',
+            error: 'bg-red-600',
+            info: 'bg-indigo-600',
+            warning: 'bg-amber-600',
+          };
+          const el = document.createElement('div');
+          el.className =
+            'toast px-4 py-3 rounded-lg shadow-lg text-sm text-white ' +
+            (colors[type] || colors.info);
+          el.textContent = msg;
+          c.appendChild(el);
+          setTimeout(() => {
+            el.remove();
+          }, 4000);
+        }
+
+        function setLoading(btn, loading) {
+          if (!btn) return;
+          if (loading) {
+            btn.dataset.origText = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML =
+              '<svg class="spinner inline-block w-4 h-4 mr-1" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Loading...';
+          } else {
+            btn.disabled = false;
+            btn.innerHTML = btn.dataset.origText || btn.innerHTML;
+          }
+        }
+
+        async function api(path, opts) {
+          const headers = { 'Content-Type': 'application/json' };
+          if (jwt) headers['Authorization'] = 'Bearer ' + jwt;
+          const res = await fetch(API + path, {
+            ...opts,
+            headers: { ...headers, ...(opts && opts.headers) },
+          });
+          const json = await res.json();
+          if (!json.success) throw new Error(json.error?.message || json.error || 'Request failed');
+          return json.data;
+        }
+
+        function statusColor(s) {
+          if (s === 'connected') return 'bg-emerald-500';
+          if (s === 'qr_ready') return 'bg-amber-500';
+          if (s === 'connecting') return 'bg-blue-500';
+          return 'bg-red-500';
+        }
+
+        function statusLabel(s) {
+          return s || 'unknown';
+        }
+
+        function connectSocket() {
+          if (socket) {
+            socket.disconnect();
+            socket = null;
+          }
+          socket = io({ auth: { token: jwt }, transports: ['websocket'] });
+          socket.on('connect', () => console.log('Socket connected'));
+          socket.on('disconnect', () => console.log('Socket disconnected'));
+
+          socket.on('instance.qr', (data) => {
+            toast('QR received for instance ' + (data.instanceId || ''), 'info');
+            showQrModal(data.instanceId, data.qr);
+          });
+
+          socket.on('instance.pairingCode', (data) => {
+            toast('Pairing code: ' + (data.pairingCode || ''), 'info');
+          });
+
+          socket.on('instance.connected', (data) => {
+            toast('Instance connected: ' + (data.instanceId || ''), 'success');
+            refreshInstances();
+          });
+
+          socket.on('instance.disconnected', (data) => {
+            toast('Instance disconnected: ' + (data.instanceId || ''), 'warning');
+            refreshInstances();
+          });
+
+          socket.on('instance.loggedOut', (data) => {
+            toast('Instance logged out: ' + (data.instanceId || ''), 'warning');
+            refreshInstances();
+          });
+
+          socket.on('message.received', (data) => {
+            toast('Message received from ' + (data.from || ''), 'info');
+          });
+
+          socket.on('message.updated', (data) => {
+            toast('Message updated: ' + (data.messageId || ''), 'info');
+          });
+        }
+
+        function subscribeInstance(instanceId) {
+          if (socket) {
+            socket.emit('subscribe-instance', instanceId, (res) => {
+              if (!res?.ok) console.warn('subscribe failed:', res?.error);
+            });
+          }
+        }
+
+        async function refreshInstances() {
+          try {
+            instances = await api('/instances');
+            renderDashboard();
+          } catch (e) {
+            toast(e.message, 'error');
+          }
+        }
+
+        async function refreshApiKeys() {
+          try {
+            apiKeys = await api('/auth/api-keys');
+            renderApiKeys();
+          } catch (e) {
+            toast(e.message, 'error');
+          }
+        }
+
+        async function refreshAudit() {
+          try {
+            const data = await api('/audit');
+            auditEntries = data.entries || [];
+            renderAudit();
+          } catch (e) {
+            toast(e.message, 'error');
+          }
+        }
+
+        /* ============ RENDER FUNCTIONS ============ */
+
+        function render() {
+          if (!jwt || !currentUser) {
+            renderLogin();
+            return;
+          }
+          renderDashboard();
+          connectSocket();
+        }
+
+        function renderLogin() {
+          document.getElementById('app').innerHTML = `
+      <div class="min-h-screen flex items-center justify-center px-4">
+        <div class="w-full max-w-md bg-gray-800 rounded-2xl shadow-2xl p-8 border border-gray-700">
+          <div class="text-center mb-8">
+            <div class="w-16 h-16 bg-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+            </div>
+            <h1 class="text-2xl font-bold text-white">WhatsApp Multi Gateway</h1>
+            <p class="text-gray-400 mt-1">Sign in to your account</p>
+          </div>
+          <form id="login-form" class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Email</label>
+              <input id="login-email" type="email" required class="w-full px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400" placeholder="admin@example.com" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Password</label>
+              <input id="login-password" type="password" required class="w-full px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400" placeholder="Password" />
+            </div>
+            <div id="login-error" class="text-red-400 text-sm hidden"></div>
+            <button id="login-btn" type="submit" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg transition-colors">Sign In</button>
+          </form>
+        </div>
+      </div>`;
+
+          document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('login-btn');
+            const errEl = document.getElementById('login-error');
+            errEl.classList.add('hidden');
+            setLoading(btn, true);
+            try {
+              const data = await api('/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({
+                  email: document.getElementById('login-email').value,
+                  password: document.getElementById('login-password').value,
+                }),
+              });
+              jwt = data.token;
+              currentUser = data.user;
+              currentTenant = data.tenant;
+              localStorage.setItem('jwt', jwt);
+              localStorage.setItem('user', JSON.stringify(currentUser));
+              localStorage.setItem('tenant', JSON.stringify(currentTenant));
+              toast('Login successful', 'success');
+              render();
+            } catch (err) {
+              errEl.textContent = err.message;
+              errEl.classList.remove('hidden');
+            } finally {
+              setLoading(btn, false);
+            }
+          });
+        }
+
+        function renderDashboard() {
+          const tenantLabel = currentTenant
+            ? escapeHtml(currentTenant.name || currentTenant.slug)
+            : '';
+          const userLabel = escapeHtml(currentUser?.name || currentUser?.email || '');
+          const roleLabel = escapeHtml(currentUser?.role || '');
+
+          document.getElementById('app').innerHTML = `
+      <div class="min-h-screen">
+        <header class="bg-gray-800 border-b border-gray-700 sticky top-0 z-40">
+          <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 bg-emerald-600 rounded-lg flex items-center justify-center">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+              </div>
+              <div>
+                <h1 class="text-lg font-bold text-white leading-tight">WhatsApp Multi Gateway</h1>
+                ${tenantLabel ? '<span class="text-xs text-gray-400">' + tenantLabel + '</span>' : ''}
+              </div>
+            </div>
+            <div class="flex items-center gap-4">
+              <span class="text-sm text-gray-300">${userLabel} <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-600/30 text-indigo-300">${roleLabel}</span></span>
+              <button id="logout-btn" class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded-lg text-gray-300 transition-colors">Logout</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <nav class="flex gap-1 mb-6 bg-gray-800 rounded-xl p-1 border border-gray-700">
+            <button class="nav-tab active px-4 py-2 rounded-lg text-sm font-medium transition-colors" data-tab="instances">Instances</button>
+            <button class="nav-tab px-4 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-white" data-tab="apikeys">API Keys</button>
+            <button class="nav-tab px-4 py-2 rounded-lg text-sm font-medium transition-colors text-gray-400 hover:text-white" data-tab="audit">Audit Log</button>
+          </nav>
+
+          <div id="tab-content"></div>
+        </div>
+      </div>
+      <div id="modal-root"></div>`;
+
+          document.getElementById('logout-btn').addEventListener('click', () => {
+            jwt = null;
+            currentUser = null;
+            currentTenant = null;
+            localStorage.clear();
+            if (socket) {
+              socket.disconnect();
+              socket = null;
+            }
+            render();
+          });
+
+          document.querySelectorAll('.nav-tab').forEach((tab) => {
+            tab.addEventListener('click', () => {
+              document.querySelectorAll('.nav-tab').forEach((t) => {
+                t.classList.remove('active');
+                t.classList.add('text-gray-400');
+              });
+              tab.classList.add('active');
+              tab.classList.remove('text-gray-400');
+              tab.style.background = '#1e293b';
+              tab.style.color = '#fff';
+              document.querySelectorAll('.nav-tab:not(.active)').forEach((t) => {
+                t.style.background = '';
+                t.style.color = '';
+              });
+              showTab(tab.dataset.tab);
+            });
+          });
+
+          const activeTab = document.querySelector('.nav-tab.active');
+          if (activeTab) {
+            activeTab.style.background = '#1e293b';
+            activeTab.style.color = '#fff';
+          }
+
+          renderInstances();
+        }
+
+        function showTab(tab) {
+          if (tab === 'instances') renderInstances();
+          else if (tab === 'apikeys') renderApiKeys();
+          else if (tab === 'audit') renderAudit();
+        }
+
+        function renderInstances() {
+          const content = document.getElementById('tab-content');
+          if (!content) return;
+
+          let cardsHtml = '';
+          if (instances.length === 0) {
+            cardsHtml =
+              '<p class="text-gray-400 text-center py-12">No instances yet. Create one below.</p>';
+          } else {
+            cardsHtml =
+              '<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">' +
+              instances
+                .map((inst) => {
+                  const sc = statusColor(inst.status);
+                  const sl = statusLabel(inst.status);
+                  const name = escapeHtml(inst.name);
+                  const iid = escapeHtml(inst.instanceId);
+                  const phone = escapeHtml(inst.phoneNumber || '-');
+                  return `
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5 flex flex-col gap-3">
+          <div class="flex items-center justify-between">
+            <h3 class="font-semibold text-white text-base">${name}</h3>
+            <span class="flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${sc} text-white font-medium"><span class="w-1.5 h-1.5 rounded-full bg-white inline-block"></span>${sl}</span>
+          </div>
+          <p class="text-xs text-gray-400 font-mono">ID: ${iid}</p>
+          <p class="text-sm text-gray-300">Phone: ${phone}</p>
+          <div class="flex flex-wrap gap-2 mt-auto pt-2">
+            <button class="inst-action px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors" data-action="reconnect" data-id="${iid}">Reconnect</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors" data-action="disconnect" data-id="${iid}">Disconnect</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors" data-action="logout" data-id="${iid}">Logout</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-amber-700 hover:bg-amber-600 rounded-lg transition-colors" data-action="qr" data-id="${iid}">Show QR</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors" data-action="pairing" data-id="${iid}">Pairing</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-indigo-700 hover:bg-indigo-600 rounded-lg transition-colors" data-action="webhook" data-id="${iid}">Webhook</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-emerald-700 hover:bg-emerald-600 rounded-lg transition-colors" data-action="send" data-id="${iid}">Send Msg</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors" data-action="chats" data-id="${iid}">Chats</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors" data-action="groups" data-id="${iid}">Groups</button>
+            <button class="inst-action px-2.5 py-1 text-xs bg-red-700 hover:bg-red-600 rounded-lg transition-colors" data-action="delete" data-id="${iid}">Delete</button>
+          </div>
+        </div>`;
+                })
+                .join('') +
+              '</div>';
+          }
+
+          content.innerHTML = `
+      <div class="space-y-6">
+        <div>
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-bold text-white">Instances</h2>
+            <button id="create-instance-toggle" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition-colors">+ New Instance</button>
+          </div>
+          <div id="create-instance-form" class="hidden bg-gray-800 rounded-xl border border-gray-700 p-5 mb-4">
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label class="block text-sm text-gray-300 mb-1">Name *</label>
+                <input id="ci-name" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="My Instance" />
+              </div>
+              <div>
+                <label class="block text-sm text-gray-300 mb-1">Phone Number (for pairing)</label>
+                <input id="ci-phone" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="1234567890" />
+              </div>
+              <div>
+                <label class="block text-sm text-gray-300 mb-1">Webhook URL</label>
+                <input id="ci-webhook" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="https://example.com/webhook" />
+              </div>
+              <div>
+                <label class="block text-sm text-gray-300 mb-1">Webhook Secret</label>
+                <input id="ci-secret" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="Min 8 characters" />
+              </div>
+            </div>
+            <div class="flex items-center gap-3 mt-4">
+              <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                <input id="ci-pairing" type="checkbox" class="rounded bg-gray-700 border-gray-600 text-emerald-500 focus:ring-emerald-500" />
+                Use Pairing Code
+              </label>
+            </div>
+            <div class="flex gap-3 mt-4">
+              <button id="ci-submit" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition-colors">Create</button>
+              <button id="ci-cancel" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm rounded-lg transition-colors">Cancel</button>
+            </div>
+          </div>
+          ${cardsHtml}
+        </div>
+      </div>`;
+
+          document.getElementById('create-instance-toggle').addEventListener('click', () => {
+            document.getElementById('create-instance-form').classList.toggle('hidden');
+          });
+          document.getElementById('ci-cancel').addEventListener('click', () => {
+            document.getElementById('create-instance-form').classList.add('hidden');
+          });
+          document.getElementById('ci-submit').addEventListener('click', handleCreateInstance);
+
+          document.querySelectorAll('.inst-action').forEach((btn) => {
+            btn.addEventListener('click', handleInstanceAction);
+          });
+
+          instances.forEach((inst) => {
+            if (inst.instanceId) subscribeInstance(inst.instanceId);
+          });
+        }
+
+        async function handleCreateInstance() {
+          const btn = document.getElementById('ci-submit');
+          setLoading(btn, true);
+          try {
+            const body = { name: document.getElementById('ci-name').value.trim() };
+            const phone = document.getElementById('ci-phone').value.trim();
+            const webhook = document.getElementById('ci-webhook').value.trim();
+            const secret = document.getElementById('ci-secret').value.trim();
+            const usePairing = document.getElementById('ci-pairing').checked;
+            if (webhook) body.webhookUrl = webhook;
+            if (secret) body.webhookSecret = secret;
+            if (usePairing) {
+              body.usePairingCode = true;
+              if (phone) body.phoneNumber = phone;
+            }
+            const data = await api('/instances', { method: 'POST', body: JSON.stringify(body) });
+            toast('Instance created', 'success');
+            if (data.instance?.instanceId) subscribeInstance(data.instance.instanceId);
+            if (data.qr) {
+              showQrModal(data.instance?.instanceId, data.qr);
+            } else if (data.pairingCode) {
+              showPairingModal(data.pairingCode, data.pairingPhoneNumber || phone);
+            }
+            await refreshInstances();
+            document.getElementById('create-instance-form').classList.add('hidden');
+            document.getElementById('ci-name').value = '';
+            document.getElementById('ci-phone').value = '';
+            document.getElementById('ci-webhook').value = '';
+            document.getElementById('ci-secret').value = '';
+            document.getElementById('ci-pairing').checked = false;
+          } catch (e) {
+            toast(e.message, 'error');
+          } finally {
+            setLoading(btn, false);
+          }
+        }
+
+        async function handleInstanceAction(e) {
+          const action = e.currentTarget.dataset.action;
+          const instanceId = e.currentTarget.dataset.id;
+
+          if (action === 'delete') {
+            if (!confirm('Delete instance ' + instanceId + '? This cannot be undone.')) return;
+            try {
+              await api('/instances/' + encodeURIComponent(instanceId), { method: 'DELETE' });
+              toast('Instance deleted', 'success');
+              refreshInstances();
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+          if (action === 'logout') {
+            if (!confirm('Logout instance ' + instanceId + '? This will disconnect WhatsApp.'))
+              return;
+            try {
+              await api('/instances/' + encodeURIComponent(instanceId) + '/logout', {
+                method: 'POST',
+              });
+              toast('Instance logged out', 'success');
+              refreshInstances();
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+          if (action === 'disconnect') {
+            try {
+              await api('/instances/' + encodeURIComponent(instanceId) + '/disconnect', {
+                method: 'POST',
+              });
+              toast('Instance disconnected', 'success');
+              refreshInstances();
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+          if (action === 'reconnect') {
+            try {
+              await api('/instances/' + encodeURIComponent(instanceId) + '/reconnect', {
+                method: 'POST',
+              });
+              toast('Instance reconnecting', 'success');
+              refreshInstances();
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+          if (action === 'qr') {
+            try {
+              const data = await api('/instances/' + encodeURIComponent(instanceId) + '/qr');
+              showQrModal(instanceId, data.qr);
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+          if (action === 'pairing') {
+            showRequestPairingModal(instanceId);
+            return;
+          }
+          if (action === 'webhook') {
+            showWebhookModal(instanceId);
+            return;
+          }
+          if (action === 'send') {
+            showSendMessageModal(instanceId);
+            return;
+          }
+          if (action === 'chats') {
+            try {
+              const data = await api('/instances/' + encodeURIComponent(instanceId) + '/chats');
+              showListModal('Chats for ' + instanceId, data.chats || []);
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+          if (action === 'groups') {
+            try {
+              const data = await api('/instances/' + encodeURIComponent(instanceId) + '/groups');
+              showListModal('Groups for ' + instanceId, data.groups || []);
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+            return;
+          }
+        }
+
+        function renderApiKeys() {
+          const content = document.getElementById('tab-content');
+          if (!content) return;
+
+          let rowsHtml = '';
+          if (apiKeys.length === 0) {
+            rowsHtml = '<p class="text-gray-400 text-center py-8">No API keys yet.</p>';
+          } else {
+            rowsHtml =
+              `<div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead><tr class="text-left text-gray-400 border-b border-gray-700">
+          <th class="pb-2 pr-4">Name</th><th class="pb-2 pr-4">Prefix</th><th class="pb-2 pr-4">Scopes</th><th class="pb-2 pr-4">Created</th><th class="pb-2">Actions</th>
+        </tr></thead>
+        <tbody>` +
+              apiKeys
+                .map(
+                  (k) => `
+          <tr class="border-b border-gray-800">
+            <td class="py-2.5 pr-4 text-white">${escapeHtml(k.name)}</td>
+            <td class="py-2.5 pr-4 font-mono text-gray-300">${escapeHtml(k.keyPrefix)}****</td>
+            <td class="py-2.5 pr-4 text-gray-400">${escapeHtml((k.scopes || []).join(', '))}</td>
+            <td class="py-2.5 pr-4 text-gray-400">${k.createdAt ? new Date(k.createdAt).toLocaleDateString() : '-'}</td>
+            <td class="py-2.5"><button class="apikey-delete text-red-400 hover:text-red-300 text-xs" data-id="${escapeHtml(k.id)}">Delete</button></td>
+          </tr>`,
+                )
+                .join('') +
+              '</tbody></table></div>';
+          }
+
+          content.innerHTML = `
+      <div class="space-y-6">
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="text-lg font-bold text-white mb-4">Create API Key</h2>
+          <div class="flex gap-3 items-end flex-wrap">
+            <div class="flex-1 min-w-[200px]">
+              <label class="block text-sm text-gray-300 mb-1">Name</label>
+              <input id="ak-name" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="My API Key" />
+            </div>
+            <div class="flex-1 min-w-[200px]">
+              <label class="block text-sm text-gray-300 mb-1">Scopes (comma-separated, or leave blank for *)</label>
+              <input id="ak-scopes" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="instances.read, instances.write" />
+            </div>
+            <button id="ak-create" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition-colors whitespace-nowrap">Create Key</button>
+          </div>
+          <div id="ak-new-key" class="hidden mt-4 p-3 bg-emerald-900/40 border border-emerald-700 rounded-lg">
+            <p class="text-sm text-emerald-300 mb-1">Your API key (copy it now, it won't be shown again):</p>
+            <div class="flex items-center gap-2">
+              <code id="ak-plaintext" class="text-sm text-white font-mono break-all"></code>
+              <button id="ak-copy" class="px-2 py-1 bg-gray-700 hover:bg-gray-600 text-xs text-gray-300 rounded transition-colors">Copy</button>
+            </div>
+          </div>
+        </div>
+        <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+          <h2 class="text-lg font-bold text-white mb-4">Existing Keys</h2>
+          ${rowsHtml}
+        </div>
+      </div>`;
+
+          document.getElementById('ak-create').addEventListener('click', async () => {
+            const btn = document.getElementById('ak-create');
+            setLoading(btn, true);
+            try {
+              const name = document.getElementById('ak-name').value.trim();
+              const scopesRaw = document.getElementById('ak-scopes').value.trim();
+              const body = { name };
+              if (scopesRaw)
+                body.scopes = scopesRaw
+                  .split(',')
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+              const data = await api('/auth/api-keys', {
+                method: 'POST',
+                body: JSON.stringify(body),
+              });
+              toast('API key created', 'success');
+              document.getElementById('ak-new-key').classList.remove('hidden');
+              document.getElementById('ak-plaintext').textContent = data.plaintextKey;
+              document.getElementById('ak-name').value = '';
+              document.getElementById('ak-scopes').value = '';
+              refreshApiKeys();
+            } catch (e) {
+              toast(e.message, 'error');
+            } finally {
+              setLoading(btn, false);
+            }
+          });
+
+          document.getElementById('ak-copy').addEventListener('click', () => {
+            navigator.clipboard.writeText(document.getElementById('ak-plaintext').textContent);
+            toast('Copied to clipboard', 'success');
+          });
+
+          document.querySelectorAll('.apikey-delete').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+              if (!confirm('Delete this API key?')) return;
+              try {
+                await api('/auth/api-keys/' + encodeURIComponent(btn.dataset.id), {
+                  method: 'DELETE',
+                });
+                toast('API key deleted', 'success');
+                refreshApiKeys();
+              } catch (e) {
+                toast(e.message, 'error');
+              }
+            });
+          });
+        }
+
+        function renderAudit() {
+          const content = document.getElementById('tab-content');
+          if (!content) return;
+
+          let rowsHtml = '';
+          if (auditEntries.length === 0) {
+            rowsHtml = '<p class="text-gray-400 text-center py-8">No audit entries.</p>';
+          } else {
+            rowsHtml =
+              `<div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead><tr class="text-left text-gray-400 border-b border-gray-700">
+          <th class="pb-2 pr-4">Time</th><th class="pb-2 pr-4">Action</th><th class="pb-2 pr-4">Resource</th><th class="pb-2">Result</th>
+        </tr></thead>
+        <tbody>` +
+              auditEntries
+                .map((e) => {
+                  const resColor = e.result === 'success' ? 'text-emerald-400' : 'text-red-400';
+                  return `
+          <tr class="border-b border-gray-800">
+            <td class="py-2.5 pr-4 text-gray-400 whitespace-nowrap">${e.timestamp ? new Date(e.timestamp).toLocaleString() : '-'}</td>
+            <td class="py-2.5 pr-4 text-white">${escapeHtml(e.action)}</td>
+            <td class="py-2.5 pr-4 text-gray-300 font-mono text-xs">${escapeHtml((e.resourceType || '') + ':' + (e.resourceId || ''))}</td>
+            <td class="py-2.5 ${resColor}">${escapeHtml(e.result)}</td>
+          </tr>`;
+                })
+                .join('') +
+              '</tbody></table></div>';
+          }
+
+          content.innerHTML = `
+      <div class="bg-gray-800 rounded-xl border border-gray-700 p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-bold text-white">Audit Log</h2>
+          <button id="audit-refresh" class="px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors">Refresh</button>
+        </div>
+        ${rowsHtml}
+      </div>`;
+
+          document.getElementById('audit-refresh').addEventListener('click', refreshAudit);
+        }
+
+        /* ============ MODALS ============ */
+
+        function openModal(html) {
+          const root = document.getElementById('modal-root');
+          root.innerHTML = `
+      <div class="fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4" id="modal-backdrop">
+        <div class="bg-gray-800 rounded-2xl border border-gray-700 shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto scrollbar-thin">
+          <div class="flex items-center justify-between p-5 border-b border-gray-700">
+            <h3 class="text-lg font-bold text-white" id="modal-title"></h3>
+            <button id="modal-close" class="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
+          </div>
+          <div class="p-5" id="modal-body"></div>
+        </div>
+      </div>`;
+          document.getElementById('modal-close').addEventListener('click', closeModal);
+          document.getElementById('modal-backdrop').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) closeModal();
+          });
+        }
+
+        function closeModal() {
+          const root = document.getElementById('modal-root');
+          root.innerHTML = '';
+        }
+
+        function showQrModal(instanceId, qr) {
+          openModal('');
+          document.getElementById('modal-title').textContent = 'QR Code — ' + (instanceId || '');
+          const body = document.getElementById('modal-body');
+          body.innerHTML = `
+      <div class="flex flex-col items-center gap-4">
+        <canvas id="qr-canvas" class="qr-canvas rounded-lg border border-gray-600"></canvas>
+        <p class="text-sm text-gray-400">Scan this QR code with WhatsApp</p>
+        <div class="flex gap-2">
+          <button id="qr-refresh-btn" class="px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors">Refresh QR</button>
+        </div>
+      </div>`;
+          if (qr && typeof QRCode !== 'undefined') {
+            QRCode.toCanvas(document.getElementById('qr-canvas'), qr, {
+              width: 256,
+              margin: 2,
+              color: { dark: '#000', light: '#fff' },
+            });
+          } else if (qr) {
+            document.getElementById('qr-canvas').outerHTML =
+              '<p class="text-white font-mono text-sm break-all">' + escapeHtml(qr) + '</p>';
+          } else {
+            body.querySelector('div').innerHTML =
+              '<p class="text-gray-400">No QR code available. Wait a moment and try again.</p>';
+          }
+          document.getElementById('qr-refresh-btn').addEventListener('click', async () => {
+            try {
+              const data = await api('/instances/' + encodeURIComponent(instanceId) + '/qr');
+              if (data.qr && typeof QRCode !== 'undefined') {
+                QRCode.toCanvas(document.getElementById('qr-canvas'), data.qr, {
+                  width: 256,
+                  margin: 2,
+                  color: { dark: '#000', light: '#fff' },
+                });
+              } else {
+                toast('No QR available yet', 'warning');
+              }
+            } catch (e) {
+              toast(e.message, 'error');
+            }
+          });
+        }
+
+        function showPairingModal(code, phone) {
+          openModal('');
+          document.getElementById('modal-title').textContent = 'Pairing Code';
+          document.getElementById('modal-body').innerHTML = `
+      <div class="text-center space-y-3">
+        <p class="text-gray-400">Enter this code on your phone:</p>
+        <p class="text-3xl font-mono font-bold text-white tracking-widest">${escapeHtml(code)}</p>
+        <p class="text-sm text-gray-400">Phone: ${escapeHtml(phone || '-')}</p>
+      </div>`;
+        }
+
+        function showRequestPairingModal(instanceId) {
+          openModal('');
+          document.getElementById('modal-title').textContent = 'Request Pairing Code';
+          document.getElementById('modal-body').innerHTML = `
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm text-gray-300 mb-1">Phone Number</label>
+          <input id="pair-phone" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="1234567890" />
+        </div>
+        <button id="pair-submit" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition-colors">Get Pairing Code</button>
+        <div id="pair-result" class="hidden"></div>
+      </div>`;
+          document.getElementById('pair-submit').addEventListener('click', async () => {
+            const btn = document.getElementById('pair-submit');
+            setLoading(btn, true);
+            try {
+              const phone = document.getElementById('pair-phone').value.trim();
+              const data = await api('/instances/' + encodeURIComponent(instanceId) + '/pairing', {
+                method: 'POST',
+                body: JSON.stringify({ phoneNumber: phone }),
+              });
+              const res = document.getElementById('pair-result');
+              res.classList.remove('hidden');
+              res.innerHTML = `
+          <div class="mt-3 p-3 bg-indigo-900/40 border border-indigo-700 rounded-lg text-center">
+            <p class="text-sm text-indigo-300 mb-1">Pairing Code:</p>
+            <p class="text-2xl font-mono font-bold text-white tracking-widest">${escapeHtml(data.pairingCode)}</p>
+            <p class="text-sm text-gray-400 mt-1">Phone: ${escapeHtml(data.phoneNumber || phone)}</p>
+          </div>`;
+            } catch (e) {
+              toast(e.message, 'error');
+            } finally {
+              setLoading(btn, false);
+            }
+          });
+        }
+
+        function showWebhookModal(instanceId) {
+          openModal('');
+          document.getElementById('modal-title').textContent = 'Configure Webhook';
+          document.getElementById('modal-body').innerHTML = `
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm text-gray-300 mb-1">Webhook URL</label>
+          <input id="wh-url" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="https://example.com/webhook" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-300 mb-1">Webhook Secret (optional, min 8 chars)</label>
+          <input id="wh-secret" type="password" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="Min 8 characters" />
+        </div>
+        <div class="flex gap-2">
+          <button id="wh-save" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition-colors">Save</button>
+          <button id="wh-test" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors">Test Webhook</button>
+        </div>
+      </div>`;
+
+          api('/instances/' + encodeURIComponent(instanceId) + '/webhook')
+            .then((data) => {
+              if (data.webhookUrl) document.getElementById('wh-url').value = data.webhookUrl;
+            })
+            .catch(() => {});
+
+          document.getElementById('wh-save').addEventListener('click', async () => {
+            const btn = document.getElementById('wh-save');
+            setLoading(btn, true);
+            try {
+              const body = { webhookUrl: document.getElementById('wh-url').value.trim() };
+              const secret = document.getElementById('wh-secret').value.trim();
+              if (secret) body.webhookSecret = secret;
+              await api('/instances/' + encodeURIComponent(instanceId) + '/webhook', {
+                method: 'PUT',
+                body: JSON.stringify(body),
+              });
+              toast('Webhook updated', 'success');
+              closeModal();
+            } catch (e) {
+              toast(e.message, 'error');
+            } finally {
+              setLoading(btn, false);
+            }
+          });
+
+          document.getElementById('wh-test').addEventListener('click', async () => {
+            const btn = document.getElementById('wh-test');
+            setLoading(btn, true);
+            try {
+              await api('/instances/' + encodeURIComponent(instanceId) + '/webhook/test', {
+                method: 'POST',
+              });
+              toast('Test webhook dispatched', 'success');
+            } catch (e) {
+              toast(e.message, 'error');
+            } finally {
+              setLoading(btn, false);
+            }
+          });
+        }
+
+        function showSendMessageModal(instanceId) {
+          openModal('');
+          document.getElementById('modal-title').textContent = 'Send Message';
+          document.getElementById('modal-body').innerHTML = `
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm text-gray-300 mb-1">To (JID)</label>
+          <input id="msg-to" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" placeholder="1234567890@s.whatsapp.net" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-300 mb-1">Message</label>
+          <textarea id="msg-text" rows="4" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm resize-none" placeholder="Hello!"></textarea>
+        </div>
+        <button id="msg-send" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg transition-colors">Send Message</button>
+      </div>`;
+          document.getElementById('msg-send').addEventListener('click', async () => {
+            const btn = document.getElementById('msg-send');
+            setLoading(btn, true);
+            try {
+              const to = document.getElementById('msg-to').value.trim();
+              const text = document.getElementById('msg-text').value;
+              const data = await api(
+                '/instances/' + encodeURIComponent(instanceId) + '/messages/text',
+                {
+                  method: 'POST',
+                  body: JSON.stringify({ to, text }),
+                },
+              );
+              toast('Message sent: ' + (data.messageId || ''), 'success');
+              closeModal();
+            } catch (e) {
+              toast(e.message, 'error');
+            } finally {
+              setLoading(btn, false);
+            }
+          });
+        }
+
+        function showListModal(title, items) {
+          openModal('');
+          document.getElementById('modal-title').textContent = title;
+          const body = document.getElementById('modal-body');
+          if (!items || items.length === 0) {
+            body.innerHTML = '<p class="text-gray-400">No items.</p>';
+            return;
+          }
+          if (typeof items[0] === 'string') {
+            body.innerHTML =
+              '<ul class="list-disc list-inside text-sm text-gray-300 space-y-1">' +
+              items.map((i) => '<li>' + escapeHtml(i) + '</li>').join('') +
+              '</ul>';
+            return;
+          }
+          const keys = Object.keys(items[0]);
+          body.innerHTML = `<div class="overflow-x-auto"><table class="w-full text-sm">
+      <thead><tr class="text-left text-gray-400 border-b border-gray-700">${keys.map((k) => '<th class="pb-2 pr-3">' + escapeHtml(k) + '</th>').join('')}</tr></thead>
+      <tbody>${items.map((item) => '<tr class="border-b border-gray-800">' + keys.map((k) => '<td class="py-2 pr-3 text-gray-300">' + escapeHtml(item[k]) + '</td>').join('') + '</tr>').join('')}</tbody></table></div>`;
+        }
+
+        render();
+
+        refreshInstances().catch(() => {});
+        refreshApiKeys().catch(() => {});
+        refreshAudit().catch(() => {});
+      })();
+    </script>
+  </body>
+</html>
