@@ -21,7 +21,8 @@
     "test:coverage": "vitest run --coverage",
     "validate": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit && npm run test:integration",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" || true"
+    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" || true",
+    "seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

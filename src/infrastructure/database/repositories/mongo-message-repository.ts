@@ -3,6 +3,7 @@ import type { Message } from '../../../domain/entities/message.js';
 import type {
   CreateMessageInput,
   MessageRepository,
+  PaginatedMessages,
   UpdateMessageStatusInput,
 } from '../../../domain/ports/message-repository.js';
 import type { MessageDocument } from '../models/message.js';
@@ -46,6 +47,34 @@ export class MongoMessageRepository implements MessageRepository {
       .lean()
       .exec();
     return docs.map(toMessage);
+  }
+
+  async findPageByInstanceAndRemoteJid(
+    instanceId: string,
+    remoteJid: string,
+    limit: number,
+    beforeCursor?: string,
+  ): Promise<PaginatedMessages> {
+    const query: Record<string, unknown> = { instanceId, remoteJid };
+    if (beforeCursor) {
+      query._id = { $lt: new Types.ObjectId(beforeCursor) };
+    }
+
+    const docs = await this.messageModel
+      .find(query)
+      .sort({ _id: -1 })
+      .limit(limit + 1)
+      .lean()
+      .exec();
+
+    const hasMore = docs.length > limit;
+    const messages = docs.slice(0, limit).map(toMessage).reverse();
+
+    return {
+      messages,
+      hasMore,
+      nextCursor: hasMore ? String(docs[limit - 1]?._id) : undefined,
+    };
   }
 
   async create(input: CreateMessageInput): Promise<Message> {

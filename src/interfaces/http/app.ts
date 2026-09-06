@@ -7,6 +7,10 @@ import compression from 'compression';
 import hpp from 'hpp';
 import { config } from '../../config.js';
 import { NotFoundError } from '../../shared/errors/index.js';
+import {
+  recordHttpRequest,
+  recordHttpRequestDuration,
+} from '../../infrastructure/metrics/metrics.js';
 import type { HttpDependencies } from './types/index.js';
 import { requestIdMiddleware } from './middleware/request-id.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -45,6 +49,19 @@ export function createApp(deps: HttpDependencies): Express {
 
   app.use(requestIdMiddleware());
   app.use(rateLimitMiddleware());
+
+  if (config.METRICS_ENABLED) {
+    app.use((req, res, next) => {
+      const start = performance.now();
+      res.on('finish', () => {
+        const duration = (performance.now() - start) / 1000;
+        const route = req.route?.path ?? req.path;
+        recordHttpRequest(req.method, route, res.statusCode);
+        recordHttpRequestDuration(req.method, route, duration);
+      });
+      next();
+    });
+  }
 
   app.use(express.static(PUBLIC_DIR, { index: false }));
 

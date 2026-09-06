@@ -8,6 +8,7 @@ import {
   disconnectFromMongo,
   checkMongoHealth,
 } from './infrastructure/database/connection.js';
+import { setActiveInstances, setConnectedInstances } from './infrastructure/metrics/metrics.js';
 import {
   MongoTenantRepository,
   MongoUserRepository,
@@ -17,6 +18,7 @@ import {
   MongoWebhookDeliveryRepository,
   MongoAuditLogRepository,
   MongoAuthRepository,
+  MongoInstanceLeaseRepository,
 } from './infrastructure/database/repositories/index.js';
 import {
   TenantModel,
@@ -28,9 +30,11 @@ import {
   AuditLogModel,
   AuthCredentialModel,
   AuthKeyModel,
+  InstanceLeaseModel,
 } from './infrastructure/database/models/index.js';
 import { WhatsAppManager } from './infrastructure/baileys/WhatsAppManager.js';
 import { WebhookDispatcher } from './infrastructure/webhooks/webhook-dispatcher.js';
+import { LeaseManager } from './infrastructure/lease/lease-manager.js';
 import { AuthService } from './application/services/auth.service.js';
 import { InstanceService } from './application/services/instance.service.js';
 import { MessageService } from './application/services/message.service.js';
@@ -49,6 +53,7 @@ export interface ApplicationContext {
   socketService: SocketService;
   httpDeps: HttpDependencies;
   startupService: StartupService;
+  webhookService: WebhookService;
 }
 
 /**
@@ -69,6 +74,7 @@ export async function createApplication(): Promise<ApplicationContext> {
     webhookDelivery: new MongoWebhookDeliveryRepository(WebhookDeliveryModel),
     auditLog: new MongoAuditLogRepository(AuditLogModel),
     auth: new MongoAuthRepository(AuthCredentialModel, AuthKeyModel),
+    instanceLease: new MongoInstanceLeaseRepository(InstanceLeaseModel),
   };
 
   const webhookDispatcher = new WebhookDispatcher({
@@ -99,11 +105,54 @@ export async function createApplication(): Promise<ApplicationContext> {
       const instance = await repositories.instance.findByInstanceId(instanceId);
       if (instance) {
         socketService.emitToTenant(instance.tenantId, event, payload);
+        await updateInstanceStatusFromEvent(instance, event, payload);
       }
     })().catch((err: unknown) => {
       logger.error({ err, event, instanceId }, 'failed to forward runtime event to socket.io');
     });
   };
+
+  async function updateInstanceStatusFromEvent(
+    instance: { _id: string; instanceId: string },
+    event: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const now = new Date();
+    switch (event) {
+      case 'instance.qr':
+        await repositories.instance.updateStatus(instance._id, 'qr_ready');
+        break;
+      case 'instance.pairingCode':
+        await repositories.instance.updateStatus(instance._id, 'connecting');
+        break;
+      case 'instance.connected':
+        await repositories.instance.updateStatus(instance._id, 'connected');
+        if (typeof payload.phoneNumber === 'string') {
+          await repositories.instance.update(instance._id, {
+            lastConnectedAt: now,
+            phoneNumber: payload.phoneNumber,
+            pushName: typeof payload.pushName === 'string' ? payload.pushName : undefined,
+          });
+        }
+        break;
+      case 'instance.disconnected':
+        await repositories.instance.updateStatus(instance._id, 'disconnected');
+        await repositories.instance.update(instance._id, { lastDisconnectedAt: now });
+        break;
+      case 'instance.loggedOut':
+        await repositories.instance.updateStatus(instance._id, 'logged_out');
+        break;
+    }
+
+    try {
+      setActiveInstances(whatsAppManager.getAllInstances().length);
+      setConnectedInstances(
+        whatsAppManager.getAllInstances().filter((i) => i.transport.isConnected()).length,
+      );
+    } catch {
+      // Metrics are best-effort; ignore failures.
+    }
+  }
 
   const messageService = new MessageService({
     messageRepository: repositories.message,
@@ -118,6 +167,9 @@ export async function createApplication(): Promise<ApplicationContext> {
     sendRuntimeEvent,
     onMessageReceived: (payload) => messageService.handleIncomingMessage(payload),
     onMessageUpdated: (payload) => messageService.handleMessageUpdate(payload),
+    getMessageFactory: (tenantId, instanceId) => {
+      return messageService.createGetMessage(tenantId, instanceId);
+    },
   });
 
   // Wire messageService to actual runtime instances
@@ -131,11 +183,12 @@ export async function createApplication(): Promise<ApplicationContext> {
     webhookDispatcher,
   });
 
-  void new WebhookService({
+  const webhookService = new WebhookService({
     instanceRepository: repositories.instance,
     webhookDispatcher,
     webhookDeliveryRepository: repositories.webhookDelivery,
   });
+  webhookService.start();
 
   const httpDeps: HttpDependencies = {
     logger,
@@ -159,6 +212,7 @@ export async function createApplication(): Promise<ApplicationContext> {
     instanceRepository: repositories.instance,
     authRepository: repositories.auth,
     whatsAppManager,
+    leaseManager: new LeaseManager({ leasePort: repositories.instanceLease }),
   });
 
   return {
@@ -169,11 +223,14 @@ export async function createApplication(): Promise<ApplicationContext> {
     socketService,
     httpDeps,
     startupService,
+    webhookService,
   };
 }
 
 export async function shutdownApplication(context: ApplicationContext): Promise<void> {
   logger.info('shutting down application');
+  context.webhookService.stop();
+  await context.startupService.shutdown();
   await context.whatsAppManager.shutdown();
   context.socketService.shutdown();
   await disconnectFromMongo();

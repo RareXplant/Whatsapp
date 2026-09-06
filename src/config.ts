@@ -17,7 +17,10 @@ function loadDotEnv(): void {
     const key = trimmed.slice(0, separatorIndex).trim();
     let value = trimmed.slice(separatorIndex + 1).trim();
 
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    const isQuoted =
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"));
+    if (isQuoted) {
       value = value.slice(1, -1);
     }
 
@@ -60,6 +63,7 @@ const envSchema = z.object({
   WEBHOOK_MAX_RETRIES: z.coerce.number().default(5),
   WEBHOOK_BASE_RETRY_MS: z.coerce.number().default(1_000),
   WEBHOOK_MAX_RETRY_MS: z.coerce.number().default(60_000),
+  WEBHOOK_RETRY_INTERVAL_MS: z.coerce.number().default(10_000),
 
   QR_TTL_SECONDS: z.coerce.number().default(30),
 
@@ -67,12 +71,21 @@ const envSchema = z.object({
   MAX_RECONNECT_ATTEMPTS: z.coerce.number().default(10),
   MAX_RECONNECT_DELAY_MS: z.coerce.number().default(300_000),
 
+  INSTANCE_LEASE_TTL_MS: z.coerce.number().default(30_000),
+  INSTANCE_LEASE_RENEW_INTERVAL_MS: z.coerce.number().default(10_000),
+
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
   METRICS_ENABLED: boolFromEnv.default(true),
 
   MEDIA_STORAGE: z.enum(['local', 's3']).default('local'),
   DATA_DIR: z.string().default('./data'),
+  MAX_UPLOAD_SIZE: z.coerce.number().default(20 * 1024 * 1024),
+  ALLOWED_MIME_TYPES: z
+    .string()
+    .default(
+      'image/jpeg,image/png,image/webp,image/gif,video/mp4,video/3gpp,audio/mpeg,audio/ogg,audio/ogg;codecs=opus,application/pdf,text/plain',
+    ),
 
   AUTH_ENCRYPTION_KEY: z.string().optional(),
 

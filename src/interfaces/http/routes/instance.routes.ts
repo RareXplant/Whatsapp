@@ -2,8 +2,13 @@ import { Router, type RequestHandler } from 'express';
 import type { Instance, UserRole } from '../../../domain/entities/index.js';
 import { createSuccessResponse } from '../../../shared/utils/index.js';
 import { ConflictError } from '../../../shared/errors/index.js';
-import { createInstanceSchema, webhookSchema, requestPairingSchema } from '../schemas/index.js';
-import { validateBody } from '../utils/validate.js';
+import {
+  createInstanceSchema,
+  webhookSchema,
+  requestPairingSchema,
+  chatHistoryQuerySchema,
+} from '../schemas/index.js';
+import { validateBody, validateQuery } from '../utils/validate.js';
 import { writeAuditLog } from '../utils/audit.js';
 import { getRouteParam } from '../utils/params.js';
 import { authenticate, requirePermission } from '../middleware/auth.js';
@@ -257,6 +262,24 @@ export function createInstanceRouter(deps: HttpDependencies): Router {
     }
   };
 
+  const getChatHistory: RequestHandler = async (req, res, next) => {
+    try {
+      const instanceId = getRouteParam(req, 'id');
+      const jid = String(req.params.jid);
+      const query = validateQuery(chatHistoryQuerySchema, req);
+      const result = await deps.messageService.getChatHistory(
+        req.tenantId,
+        instanceId,
+        jid,
+        query.limit ?? 50,
+        query.cursor,
+      );
+      res.status(200).json(createSuccessResponse(result, req.requestId));
+    } catch (err) {
+      next(err);
+    }
+  };
+
   const getWebhook: RequestHandler = async (req, res, next) => {
     try {
       const instanceId = getRouteParam(req, 'id');
@@ -365,6 +388,7 @@ export function createInstanceRouter(deps: HttpDependencies): Router {
     deleteInstance,
   );
   router.get('/instances/:id/chats', authenticate(deps), listChats);
+  router.get('/instances/:id/chats/:jid/messages', authenticate(deps), getChatHistory);
   router.get('/instances/:id/groups', authenticate(deps), listGroups);
   router.get('/instances/:id/webhook', authenticate(deps), getWebhook);
   router.put(

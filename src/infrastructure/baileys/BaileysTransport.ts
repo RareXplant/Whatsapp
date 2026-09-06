@@ -13,6 +13,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'node:events';
+import NodeCache from 'node-cache';
 import { config } from '../../config.js';
 import type { Logger } from '../../logger.js';
 import type { MessageStatus, MessageType } from '../../domain/entities/index.js';
@@ -137,6 +138,11 @@ export class BaileysTransport extends EventEmitter implements WhatsAppTransport 
         browser: ['WhatsApp Gateway', 'Chrome', '1.0.0'],
         getMessage: (key: WAMessageKey): Promise<proto.IMessage | undefined> =>
           this.messageGetter ? this.messageGetter(key) : Promise.resolve(undefined),
+        msgRetryCounterCache: new NodeCache({
+          stdTTL: 300,
+          checkperiod: 60,
+          useClones: false,
+        }),
       });
 
       this.socket = socket;

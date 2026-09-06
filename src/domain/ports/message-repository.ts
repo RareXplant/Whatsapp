@@ -17,9 +17,21 @@ export interface CreateMessageInput {
 
 export type UpdateMessageStatusInput = MessageStatus;
 
+export interface PaginatedMessages {
+  messages: Message[];
+  hasMore: boolean;
+  nextCursor?: string;
+}
+
 export interface MessageRepository {
   findById(id: string): Promise<Message | null>;
   findByInstanceAndRemoteJid(instanceId: string, remoteJid: string): Promise<Message[]>;
+  findPageByInstanceAndRemoteJid(
+    instanceId: string,
+    remoteJid: string,
+    limit: number,
+    beforeCursor?: string,
+  ): Promise<PaginatedMessages>;
   create(input: CreateMessageInput): Promise<Message>;
   updateStatus(id: string, status: UpdateMessageStatusInput): Promise<Message | null>;
   findByTenantId(tenantId: string): Promise<Message[]>;

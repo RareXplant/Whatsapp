@@ -7,3 +7,4 @@ export type { WebhookDelivery, WebhookDeliveryStatus } from './webhook-delivery.
 export type { AuditLog, AuditResult } from './audit-log.js';
 export type { AuthCredential } from './auth-credential.js';
 export type { AuthKey, AuthKeyCategory } from './auth-key.js';
+export type { InstanceLease } from './instance-lease.js';

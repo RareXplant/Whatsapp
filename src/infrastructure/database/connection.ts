@@ -1,9 +1,6 @@
 import mongoose from 'mongoose';
-import { MongoMemoryServer } from 'mongodb-memory-server';
 import { config } from '../../config.js';
 import { logger } from '../../logger.js';
-
-let memoryMongoServer: MongoMemoryServer | null = null;
 
 export interface MongoHealth {
   status: 'connected' | 'disconnected' | 'connecting' | 'disconnecting' | 'uninitialized';
@@ -60,31 +57,15 @@ export async function connectToMongo(): Promise<void> {
       serverSelectionTimeoutMS: 15_000,
     });
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    const isConnectionError = /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|querySrv/i.test(error.message);
-
-    if (config.NODE_ENV === 'production' || !isConnectionError) {
-      throw err;
-    }
-
-    logger.warn(
+    logger.error(
       {
         dbName: config.MONGODB_DB_NAME,
         host: toSafeUri(config.MONGODB_URI),
-        error: error.message,
+        error: err instanceof Error ? err.message : String(err),
       },
-      'mongodb unavailable, starting in-memory fallback database',
+      'mongodb connection failed — refusing to start with a fallback database',
     );
-
-    memoryMongoServer = await MongoMemoryServer.create({
-      instance: { dbName: config.MONGODB_DB_NAME },
-    });
-
-    await mongoose.connect(memoryMongoServer.getUri(config.MONGODB_DB_NAME), {
-      dbName: config.MONGODB_DB_NAME,
-      autoCreate: true,
-      serverSelectionTimeoutMS: 15_000,
-    });
+    throw err;
   }
 
   logger.info({ dbName: config.MONGODB_DB_NAME }, 'mongodb connected');
@@ -93,11 +74,6 @@ export async function connectToMongo(): Promise<void> {
 export async function disconnectFromMongo(): Promise<void> {
   if (mongoose.connection.readyState !== 0) {
     await mongoose.disconnect();
-  }
-
-  if (memoryMongoServer) {
-    await memoryMongoServer.stop();
-    memoryMongoServer = null;
   }
 
   logger.info({}, 'mongodb disconnected');

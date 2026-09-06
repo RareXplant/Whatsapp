@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { proto } from '@whiskeysockets/baileys';
 import { useMongoAuthState } from '../../../../../src/infrastructure/baileys/auth/useMongoAuthState.js';
+import type { AuthKeyCategory } from '../../../../../src/domain/entities/index.js';
 import { InMemoryAuthRepository } from '../../../../../tests/mocks/repositories.js';
 
 const TENANT = 'tenant_1';
@@ -13,7 +14,6 @@ describe('useMongoAuthState', () => {
 
     expect(state.creds).toBeDefined();
     expect(typeof state.creds.registrationId).toBe('number');
-    expect(state.creds.noiseKey).toBeDefined();
     expect(state.keys).toBeDefined();
     expect(typeof state.keys.get).toBe('function');
     expect(typeof state.keys.set).toBe('function');
@@ -34,14 +34,14 @@ describe('useMongoAuthState', () => {
     expect(second.state.creds.platform).toBe('android');
   });
 
-  it('reads back creds previously stored in the repository', async () => {
+  it('round-trips creds through saveCreds and reload', async () => {
     const repository = new InMemoryAuthRepository();
     const first = await useMongoAuthState(TENANT, INSTANCE, repository);
     await first.saveCreds();
 
-    const stored = await repository.findCreds(TENANT, INSTANCE);
-    expect(stored).not.toBeNull();
-    expect(stored?.creds).toHaveProperty('registrationId');
+    const second = await useMongoAuthState(TENANT, INSTANCE, repository);
+    expect(second.state.creds.registrationId).toBe(first.state.creds.registrationId);
+    expect(second.state.creds.noiseKey).toBeDefined();
   });
 
   it('stores compound key ids for supported categories', async () => {
@@ -60,10 +60,6 @@ describe('useMongoAuthState', () => {
     const stored = await repository.findKeys(TENANT, INSTANCE, 'pre-key');
     expect(stored).toHaveLength(1);
     expect(stored[0].keyId).toBe('pre-key|1');
-    expect(stored[0].data).toEqual({
-      private: { type: 'Buffer', data: Buffer.from('priv').toString('base64') },
-      public: { type: 'Buffer', data: Buffer.from('pub').toString('base64') },
-    });
   });
 
   it('returns stored values for supported categories with buffers restored', async () => {
@@ -88,14 +84,56 @@ describe('useMongoAuthState', () => {
     expect(Buffer.isBuffer(preKey.public)).toBe(true);
   });
 
-  it('skips unsupported categories on set and get', async () => {
+  it('persists all 10 Baileys SignalDataTypeMap categories', async () => {
     const repository = new InMemoryAuthRepository();
     const { state } = await useMongoAuthState(TENANT, INSTANCE, repository);
 
-    await state.keys.set({ 'lid-mapping': { abc: {} } } as never);
+    await state.keys.set({
+      'pre-key': { '1': { private: Buffer.from('priv'), public: Buffer.from('pub') } },
+      session: { 'user@s.whatsapp.net': Buffer.from('sess') },
+      'sender-key': { 'group@g.us': Buffer.from('sk') },
+      'sender-key-memory': { 'user@s.whatsapp.net': true },
+      'app-state-sync-key': {
+        syncHash: {
+          keyData: Buffer.from('key'),
+          fingerprint: { rawId: 1, currentIndex: 2, deviceIndexes: [3] },
+          timestamp: 1700000000,
+        },
+      },
+      'app-state-sync-version': { version: 1, hash: Buffer.from('h'), indexValueMap: {} },
+      'lid-mapping': { 'user@s.whatsapp.net': 'lid123' },
+      'device-list': { 'user@s.whatsapp.net': ['0', '1'] },
+      tctoken: { token: Buffer.from('tc'), timestamp: '12345' },
+      'identity-key': Buffer.from('ik'),
+    } as never);
+
+    const allCategories: AuthKeyCategory[] = [
+      'pre-key',
+      'session',
+      'sender-key',
+      'sender-key-memory',
+      'app-state-sync-key',
+      'app-state-sync-version',
+      'lid-mapping',
+      'device-list',
+      'tctoken',
+      'identity-key',
+    ];
+
+    for (const cat of allCategories) {
+      const stored = await repository.findKeys(TENANT, INSTANCE, cat);
+      expect(stored.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('skips truly unknown categories on set', async () => {
+    const repository = new InMemoryAuthRepository();
+    const { state } = await useMongoAuthState(TENANT, INSTANCE, repository);
+
+    await state.keys.set({ 'totally-unknown-cat': { abc: {} } } as never);
     expect(repository.keys.size).toBe(0);
 
-    const got = await state.keys.get('lid-mapping', ['abc']);
+    const got = await state.keys.get('totally-unknown-cat' as never, ['abc']);
     expect(Object.keys(got)).toHaveLength(0);
   });
 

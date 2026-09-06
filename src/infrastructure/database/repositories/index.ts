@@ -6,3 +6,4 @@ export { MongoMessageRepository } from './mongo-message-repository.js';
 export { MongoWebhookDeliveryRepository } from './mongo-webhook-delivery-repository.js';
 export { MongoAuditLogRepository } from './mongo-audit-log-repository.js';
 export { MongoAuthRepository } from './mongo-auth-repository.js';
+export { MongoInstanceLeaseRepository } from './mongo-instance-lease-repository.js';

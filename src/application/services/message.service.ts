@@ -3,6 +3,7 @@ import type { Message } from '../../domain/entities/index.js';
 import type {
   InstanceRepository,
   MessageRepository,
+  PaginatedMessages,
   WebhookDispatcherPort,
   WhatsAppMessageReceivedPayload,
   WhatsAppMessageUpdatedPayload,
@@ -55,6 +56,26 @@ export class MessageService {
 
   setRuntimeProvider(provider: (instanceId: string) => RuntimeInstance | undefined): void {
     this.runtimeProvider = provider;
+  }
+
+  async getChatHistory(
+    tenantId: string,
+    instanceId: string,
+    remoteJid: string,
+    limit: number,
+    cursor?: string,
+  ): Promise<PaginatedMessages> {
+    const instance = await this.instanceRepository.findByInstanceId(instanceId);
+    if (!instance || instance.tenantId !== tenantId) {
+      throw new InstanceNotFoundError(instanceId);
+    }
+
+    return this.messageRepository.findPageByInstanceAndRemoteJid(
+      instanceId,
+      remoteJid,
+      limit,
+      cursor,
+    );
   }
 
   async sendText(

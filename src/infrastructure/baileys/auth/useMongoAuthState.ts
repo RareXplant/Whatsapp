@@ -9,7 +9,10 @@ import {
   type SignalKeyStore,
 } from '@whiskeysockets/baileys';
 import type { AuthKeyCategory } from '../../../domain/entities/index.js';
+import { AUTH_KEY_CATEGORIES } from '../../database/models/auth-key.js';
 import type { AuthRepository } from '../../../domain/ports/index.js';
+import { config } from '../../../config.js';
+import { encryptData, decryptData } from '../../../shared/crypto/index.js';
 import { logger } from '../../../logger.js';
 
 /**
@@ -19,20 +22,8 @@ import { logger } from '../../../logger.js';
  */
 const KEY_ID_SEPARATOR = '|';
 
-/**
- * Categories the domain AuthRepository is able to persist. Other key types
- * emitted by Baileys v7 (lid-mapping, device-list, tctoken, identity-key,
- * sender-key-memory, app-state-sync-version) are regenerable and are skipped.
- */
-const SUPPORTED_CATEGORIES: ReadonlySet<AuthKeyCategory> = new Set([
-  'pre-key',
-  'session',
-  'sender-key',
-  'app-state-sync-key',
-]);
-
 function isSupportedCategory(type: keyof SignalDataTypeMap): type is AuthKeyCategory {
-  return SUPPORTED_CATEGORIES.has(type as AuthKeyCategory);
+  return (AUTH_KEY_CATEGORIES as string[]).includes(type);
 }
 
 /**
@@ -65,6 +56,54 @@ function extractKeyId(category: string, compoundKeyId: string): string {
   return compoundKeyId.slice(category.length + KEY_ID_SEPARATOR.length);
 }
 
+function hasEncryptionKey(): boolean {
+  return typeof config.AUTH_ENCRYPTION_KEY === 'string' && config.AUTH_ENCRYPTION_KEY.length > 0;
+}
+
+interface EncryptedEnvelope {
+  enc: {
+    v: number;
+    alg: string;
+    ct: string;
+  };
+}
+
+function isEncryptedEnvelope(value: unknown): value is EncryptedEnvelope {
+  if (typeof value !== 'object' || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.enc !== 'object' || obj.enc === null) return false;
+  const enc = obj.enc as Record<string, unknown>;
+  return typeof enc.v === 'number' && typeof enc.ct === 'string';
+}
+
+function encryptEnvelope(data: Record<string, unknown>): EncryptedEnvelope {
+  const serialized = JSON.stringify(data);
+  const ct = encryptData(serialized, config.AUTH_ENCRYPTION_KEY!);
+  return { enc: { v: 1, alg: 'aes-256-gcm', ct } };
+}
+
+function decryptEnvelope<T>(envelope: EncryptedEnvelope): T | null {
+  try {
+    const decrypted = decryptData(envelope.enc.ct, config.AUTH_ENCRYPTION_KEY!);
+    return JSON.parse(decrypted, BufferJSON.reviver) as T;
+  } catch (err) {
+    logger.warn({ err }, 'failed to decrypt auth state envelope');
+    return null;
+  }
+}
+
+function maybeEncrypt(data: Record<string, unknown>): Record<string, unknown> {
+  if (!hasEncryptionKey()) return data;
+  return encryptEnvelope(data) as unknown as Record<string, unknown>;
+}
+
+function maybeDecrypt<T>(data: Record<string, unknown>): T | null {
+  if (isEncryptedEnvelope(data)) {
+    return decryptEnvelope<T>(data);
+  }
+  return deserialize<T>(data);
+}
+
 export interface MongoAuthState {
   state: AuthenticationState;
   saveCreds: () => Promise<void>;
@@ -82,7 +121,8 @@ export async function useMongoAuthState(
 ): Promise<MongoAuthState> {
   const credsDocument = await authRepository.findCreds(tenantId, instanceId);
   const creds: AuthenticationCreds =
-    deserialize<AuthenticationCreds>(credsDocument?.creds) ?? initAuthCreds();
+    (credsDocument?.creds ? maybeDecrypt<AuthenticationCreds>(credsDocument.creds) : null) ??
+    initAuthCreds();
 
   const keys: SignalKeyStore = {
     get: async <T extends keyof SignalDataTypeMap>(
@@ -101,7 +141,7 @@ export async function useMongoAuthState(
       for (const id of ids) {
         const record = byId.get(id);
         if (record === undefined) continue;
-        const value = deserialize<SignalDataTypeMap[T]>(record);
+        const value = maybeDecrypt<SignalDataTypeMap[T]>(record);
         if (value === null) continue;
 
         if (type === 'app-state-sync-key') {
@@ -138,7 +178,8 @@ export async function useMongoAuthState(
           if (value === null || value === undefined) {
             deleteCompoundKeys.push(compoundKeyId);
           } else {
-            upsertEntries[compoundKeyId] = serialize(value);
+            const serialized = serialize(value);
+            upsertEntries[compoundKeyId] = maybeEncrypt(serialized);
           }
         }
 
@@ -158,7 +199,9 @@ export async function useMongoAuthState(
   };
 
   const saveCreds = async (): Promise<void> => {
-    await authRepository.saveCreds(tenantId, instanceId, serialize(creds));
+    const serialized = serialize(creds);
+    const stored = maybeEncrypt(serialized);
+    await authRepository.saveCreds(tenantId, instanceId, stored);
     logger.debug({ tenantId, instanceId }, 'baileys creds persisted');
   };
 

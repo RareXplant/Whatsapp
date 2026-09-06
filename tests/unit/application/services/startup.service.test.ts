@@ -3,6 +3,7 @@ import { StartupService } from '../../../../src/application/services/startup.ser
 import { WhatsAppManager } from '../../../../src/infrastructure/baileys/WhatsAppManager.js';
 import type { TransportFactory } from '../../../../src/infrastructure/baileys/WhatsAppManager.js';
 import type { BaileysTransport } from '../../../../src/infrastructure/baileys/BaileysTransport.js';
+import type { LeaseManager } from '../../../../src/infrastructure/lease/lease-manager.js';
 import { FakeTransport } from '../../../mocks/fake-transport.js';
 import { InMemoryAuthRepository, InMemoryInstanceRepository } from '../../../mocks/repositories.js';
 import { makeInstance } from '../../../helpers/factories.js';
@@ -27,6 +28,14 @@ function setup() {
     instanceRepository,
     authRepository,
     whatsAppManager: manager,
+    leaseManager: {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+      startRenewal: vi.fn(),
+      stopRenewal: vi.fn(),
+      releaseAll: vi.fn().mockResolvedValue(undefined),
+      getOwnerId: vi.fn().mockReturnValue('test-owner'),
+    } as unknown as LeaseManager,
   });
 
   return { service, instanceRepository, authRepository, manager };

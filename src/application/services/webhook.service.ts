@@ -1,4 +1,5 @@
 import { logger, type Logger } from '../../logger.js';
+import { config } from '../../config.js';
 import type {
   InstanceRepository,
   WebhookDeliveryRepository,
@@ -19,12 +20,36 @@ export class WebhookService {
   private readonly instanceRepository: InstanceRepository;
   private readonly webhookDeliveryRepository: WebhookDeliveryRepository;
   private readonly logger: Logger;
+  private retryTimer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
 
   constructor(options: WebhookServiceOptions) {
     this.webhookDispatcher = options.webhookDispatcher;
     this.instanceRepository = options.instanceRepository;
     this.webhookDeliveryRepository = options.webhookDeliveryRepository;
     this.logger = options.logger ?? logger;
+  }
+
+  start(): void {
+    if (this.retryTimer) return;
+    this.stopped = false;
+    const intervalMs = config.WEBHOOK_RETRY_INTERVAL_MS;
+    this.retryTimer = setInterval(() => {
+      if (this.stopped) return;
+      void this.webhookDispatcher.retryPending().catch((err: unknown) => {
+        this.logger.error({ err }, 'webhook retry cycle failed');
+      });
+    }, intervalMs);
+    this.logger.info({ intervalMs }, 'webhook retry worker started');
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.retryTimer) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.logger.info('webhook retry worker stopped');
   }
 
   async deliver(

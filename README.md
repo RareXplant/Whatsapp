@@ -79,9 +79,17 @@ cp .env.example .env
 # 3. Install dependencies
 npm install
 
-# 4. Start the dev server (default port 3333)
+# 4. Start MongoDB (the example URI expects the provided Compose service)
+docker compose up -d mongodb
+
+# 5. Start the dev server (default port 3333)
 npm run dev
 ```
+
+For MongoDB Atlas, replace `MONGODB_URI` with a working connection string and
+ensure the machine can resolve the Atlas SRV record and that its IP is allowed
+in the Atlas network access list. The application intentionally does not fall
+back to another database after an explicit MongoDB connection fails.
 
 Once running, verify the server:
 

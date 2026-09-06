@@ -18,3 +18,20 @@ export function validateBody<T>(schema: ZodType<T>, req: Request): T {
   }
   return result.data;
 }
+
+/**
+ * Validates `req.query` against the supplied Zod schema and returns the parsed
+ * value. Throws a `ValidationError` (400) without leaking details when parsing
+ * fails.
+ */
+export function validateQuery<T>(schema: ZodType<T>, req: Request): T {
+  const result = schema.safeParse(req.query);
+  if (!result.success) {
+    const details = result.error.issues.reduce<Record<string, string>>((acc, issue) => {
+      acc[issue.path.join('.')] = issue.message;
+      return acc;
+    }, {});
+    throw new ValidationError('Invalid query parameters', details);
+  }
+  return result.data;
+}

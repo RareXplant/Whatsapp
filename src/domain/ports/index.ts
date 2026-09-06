@@ -6,7 +6,11 @@ export type {
   CreateInstanceInput,
   UpdateInstanceInput,
 } from './instance-repository.js';
-export type { MessageRepository, CreateMessageInput } from './message-repository.js';
+export type {
+  MessageRepository,
+  CreateMessageInput,
+  PaginatedMessages,
+} from './message-repository.js';
 export type {
   WebhookDeliveryRepository,
   CreateWebhookDeliveryInput,
@@ -28,5 +32,6 @@ export type {
 } from './whatsapp-transport.js';
 export type { MediaStoragePort, StoredMedia } from './media-storage.js';
 export type { WebhookDispatcherPort } from './webhook-dispatcher.js';
+export type { InstanceLeasePort } from './instance-lease.js';
 
 export type { CreateTenantInput, UpdateTenantInput } from './tenant-repository.js';

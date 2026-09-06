@@ -11,6 +11,7 @@ import type {
   CreateWebhookDeliveryInput,
   InstanceRepository,
   MessageRepository,
+  PaginatedMessages,
   TenantRepository,
   UpdateInstanceInput,
   UpdateTenantInput,
@@ -271,6 +272,29 @@ export class InMemoryMessageRepository implements MessageRepository {
         (m) => m.instanceId === instanceId && m.remoteJid === remoteJid,
       ),
     );
+  }
+
+  async findPageByInstanceAndRemoteJid(
+    instanceId: string,
+    remoteJid: string,
+    limit: number,
+    beforeCursor?: string,
+  ): Promise<PaginatedMessages> {
+    const matching = [...this.items.values()]
+      .filter((m) => m.instanceId === instanceId && m.remoteJid === remoteJid)
+      .sort((left, right) => right._id.localeCompare(left._id));
+    const beforeIndex = beforeCursor
+      ? matching.findIndex((message) => message._id === beforeCursor)
+      : -1;
+    const candidates = beforeIndex === -1 ? matching : matching.slice(beforeIndex + 1);
+    const page = candidates.slice(0, limit + 1);
+    const hasMore = page.length > limit;
+
+    return {
+      messages: fresh()(page.slice(0, limit).reverse()),
+      hasMore,
+      nextCursor: hasMore ? page[limit - 1]?._id : undefined,
+    };
   }
 
   async create(input: CreateMessageInput): Promise<Message> {

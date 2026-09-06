@@ -2,7 +2,11 @@ import { Mutex } from 'async-mutex';
 import { DisconnectReason } from '@whiskeysockets/baileys';
 import { config } from '../../config.js';
 import { logger as sharedLogger, type Logger } from '../../logger.js';
-import { BaileysTransport, type BaileysTransportOptions } from './BaileysTransport.js';
+import {
+  BaileysTransport,
+  type BaileysTransportOptions,
+  type GetMessage,
+} from './BaileysTransport.js';
 import type {
   AuthRepository,
   WhatsAppConnectedPayload,
@@ -43,11 +47,14 @@ export type SendRuntimeEvent = (event: string, payload: Record<string, unknown>)
 
 export type TransportFactory = (options: BaileysTransportOptions) => BaileysTransport;
 
+export type GetMessageFactory = (tenantId: string, instanceId: string) => GetMessage;
+
 export interface WhatsAppManagerOptions {
   authRepository: AuthRepository;
   sendRuntimeEvent?: SendRuntimeEvent;
   onMessageReceived?: (payload: WhatsAppMessageReceivedPayload) => Promise<void> | void;
   onMessageUpdated?: (payload: WhatsAppMessageUpdatedPayload) => Promise<void> | void;
+  getMessageFactory?: GetMessageFactory;
   logger?: Logger;
   transportFactory?: TransportFactory;
 }
@@ -60,8 +67,11 @@ const noopSendRuntimeEvent: SendRuntimeEvent = (event, payload) => {
 export class WhatsAppManager {
   private readonly instances = new Map<string, RuntimeInstance>();
   private readonly instanceMutexes = new Map<string, Mutex>();
-  private readonly options: Required<Omit<WhatsAppManagerOptions, 'authRepository'>> & {
+  private readonly options: Required<
+    Omit<WhatsAppManagerOptions, 'authRepository' | 'getMessageFactory'>
+  > & {
     authRepository: AuthRepository;
+    getMessageFactory?: GetMessageFactory;
   };
 
   constructor(options: WhatsAppManagerOptions) {
@@ -70,6 +80,7 @@ export class WhatsAppManager {
       sendRuntimeEvent: options.sendRuntimeEvent ?? noopSendRuntimeEvent,
       onMessageReceived: options.onMessageReceived ?? (() => undefined),
       onMessageUpdated: options.onMessageUpdated ?? (() => undefined),
+      getMessageFactory: options.getMessageFactory,
       logger: options.logger ?? sharedLogger,
       transportFactory: options.transportFactory ?? ((opts) => new BaileysTransport(opts)),
     };
@@ -96,6 +107,10 @@ export class WhatsAppManager {
         authRepository: this.options.authRepository,
         logger: this.options.logger,
       });
+
+      if (this.options.getMessageFactory) {
+        transport.setGetMessage(this.options.getMessageFactory(tenantId, instanceId));
+      }
 
       const runtime: RuntimeInstance = {
         transport,

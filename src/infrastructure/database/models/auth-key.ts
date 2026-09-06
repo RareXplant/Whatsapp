@@ -5,7 +5,13 @@ export const AUTH_KEY_CATEGORIES: AuthKeyCategory[] = [
   'pre-key',
   'session',
   'sender-key',
+  'sender-key-memory',
   'app-state-sync-key',
+  'app-state-sync-version',
+  'lid-mapping',
+  'device-list',
+  'tctoken',
+  'identity-key',
 ];
 
 export interface AuthKeyDocument {

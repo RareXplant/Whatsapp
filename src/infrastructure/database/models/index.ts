@@ -7,3 +7,4 @@ export * from './webhook-delivery.js';
 export * from './audit-log.js';
 export * from './auth-credential.js';
 export * from './auth-key.js';
+export * from './instance-lease.js';

@@ -39,13 +39,6 @@ export function errorHandler(logger: Logger): ErrorRequestHandler {
     );
     res
       .status(500)
-      .json(
-        createErrorResponse(
-          'INTERNAL_ERROR',
-          'An unexpected error occurred',
-          requestId,
-          err instanceof Error ? { message: err.message } : undefined,
-        ),
-      );
+      .json(createErrorResponse('INTERNAL_ERROR', 'An unexpected error occurred', requestId));
   };
 }

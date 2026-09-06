@@ -62,3 +62,10 @@ export type SendMessageInput = z.infer<typeof sendMessageSchema>;
 export type WebhookInput = z.infer<typeof webhookSchema>;
 export type RequestPairingInput = z.infer<typeof requestPairingSchema>;
 export type AuditQueryInput = z.infer<typeof auditQuerySchema>;
+
+export const chatHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  cursor: z.string().optional(),
+});
+
+export type ChatHistoryQueryInput = z.infer<typeof chatHistoryQuerySchema>;
